@@ -5,7 +5,6 @@ const root = dirname(fileURLToPath(import.meta.url));
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-	distDir: './dist',
 	turbopack: {
 		root,
 	},
