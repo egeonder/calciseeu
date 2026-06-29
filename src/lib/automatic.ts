@@ -22,6 +22,26 @@ export interface AutomaticChatMessage {
 	createdAt: string;
 }
 
+/** A single clarifying question the agent asks only to disambiguate documents. */
+export interface AutomaticClarifyingQuestion {
+	id: string;
+	/** The question text shown to the user. */
+	question: string;
+	/** Optional preset answers the user can pick with a single tap. When
+	 * present, the user may still type their own answer instead. */
+	options?: string[];
+	/** Placeholder for the free-text field. */
+	placeholder?: string;
+}
+
+/** A batch of clarifying questions awaiting the user's answers. The user works
+ * through them one at a time; the agent resumes once they are answered. */
+export interface AutomaticPendingQuestions {
+	id: string;
+	questions: AutomaticClarifyingQuestion[];
+	createdAt: string;
+}
+
 export interface AutomaticIseeuResult {
 	referenceYear: number;
 	householdSize: number;
@@ -97,5 +117,7 @@ export interface AutomaticCalculationData {
 	documents: AutomaticDocumentRef[];
 	messages?: AutomaticChatMessage[];
 	parameters?: AutomaticCalculationParameter[];
+	/** Clarifying questions the agent is currently waiting on, if any. */
+	pendingQuestions?: AutomaticPendingQuestions | null;
 	result?: AutomaticIseeuResult;
 }

@@ -46,6 +46,7 @@ import {
 	type LibraryDocument,
 } from '@/src/lib/document-library';
 import { DocumentPreviewDialog } from '@/src/components/document-preview-dialog';
+import { useDocumentAnalysisStatuses } from '@/src/hooks/use-document-analysis-statuses';
 import {
 	formatBytes,
 	useFileUpload,
@@ -217,6 +218,19 @@ export function AutomaticDocumentUpload({
 	const previewDocumentId = selectedFile
 		? documentIdFor(selectedFile)
 		: undefined;
+
+	// Poll analysis status for every resolved document so a failed analysis is
+	// flagged on its card — letting the user know it can't feed the calculation
+	// before they ever open the preview.
+	const analysisIds = useMemo(
+		() =>
+			files
+				.map((item) => documentIdFor(item))
+				.filter((id): id is string => !!id),
+		[files, documentIdFor],
+	);
+	const { statuses: analysisStatuses, refresh: refreshAnalysisStatuses } =
+		useDocumentAnalysisStatuses(analysisIds);
 
 	// Resolved descriptors carrying the *real* document id (not the local file
 	// id) and a preview URL, so the overview can rename/preview each document.
@@ -458,6 +472,11 @@ export function AutomaticDocumentUpload({
 							const canPreview =
 								status === 'done' && !!item.preview;
 							const isLibraryDoc = !(item.file instanceof File);
+							const docId = documentIdFor(item);
+							const analysisFailed =
+								status === 'done' &&
+								!!docId &&
+								analysisStatuses[docId] === 'failed';
 
 							return (
 								<article
@@ -555,6 +574,16 @@ export function AutomaticDocumentUpload({
 												'Dosya yüklenemedi.'}
 										</p>
 									)}
+									{analysisFailed && (
+										<p className="flex items-center gap-1.5 text-xs text-destructive">
+											<WarningCircleIcon
+												weight="fill"
+												className="shrink-0"
+											/>
+											Belge analiz edilemedi. Önizleyip
+											yeniden deneyin.
+										</p>
+									)}
 								</article>
 							);
 						})}
@@ -577,6 +606,7 @@ export function AutomaticDocumentUpload({
 				onOpenChange={(open) => {
 					if (!open) setSelectedFile(null);
 				}}
+				onReanalyzed={refreshAnalysisStatuses}
 			/>
 
 			{/* Library picker dialog */}

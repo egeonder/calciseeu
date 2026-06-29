@@ -14,6 +14,7 @@ import {
 	PencilSimpleIcon,
 	TrashIcon,
 	UploadSimpleIcon,
+	WarningCircleIcon,
 	XIcon,
 } from '@phosphor-icons/react';
 import { toast } from 'sonner';
@@ -50,6 +51,7 @@ import {
 	type LibraryDocument,
 } from '@/src/lib/document-library';
 import { DocumentPreviewDialog } from '@/src/components/document-preview-dialog';
+import { useDocumentAnalysisStatuses } from '@/src/hooks/use-document-analysis-statuses';
 import { uploadDocument } from '@/src/lib/document-upload';
 import { DOCUMENT_ACCEPT, validateDroppedFiles } from '@/src/lib/documents';
 import { useWindowFileDrop } from '@/src/hooks/use-window-file-drop';
@@ -164,11 +166,14 @@ function PendingCard({
 /** A single document: preview, rename (button / double-click), or delete. */
 function DocumentCard({
 	doc,
+	analysisStatus,
 	onRenamed,
 	onDeleted,
 	onPreview,
 }: {
 	doc: LibraryDocument;
+	/** Live analysis status, overriding the snapshot loaded with the list. */
+	analysisStatus: LibraryDocument['analysisStatus'];
 	onRenamed: (id: string, name: string) => void;
 	onDeleted: (id: string) => void;
 	onPreview: (doc: LibraryDocument) => void;
@@ -255,6 +260,15 @@ function DocumentCard({
 						{formatBytes(doc.size)} ·{' '}
 						{dateFormatter.format(new Date(doc.createdAt))}
 					</p>
+					{analysisStatus === 'failed' && (
+						<p className="mt-0.5 flex items-center gap-1 text-xs text-destructive">
+							<WarningCircleIcon
+								weight="fill"
+								className="size-3.5 shrink-0"
+							/>
+							Belge analiz edilemedi
+						</p>
+					)}
 				</div>
 
 				<div className="flex shrink-0 items-center gap-1">
@@ -597,6 +611,15 @@ function DocumentsContent() {
 
 	const total = documents?.length ?? 0;
 
+	// Live analysis statuses, so a freshly uploaded document flips to "failed"
+	// (or away from it after a retry) without needing a manual refresh.
+	const documentIds = useMemo(
+		() => documents?.map((doc) => doc.id) ?? [],
+		[documents],
+	);
+	const { statuses: liveStatuses, refresh: refreshStatuses } =
+		useDocumentAnalysisStatuses(documentIds);
+
 	let body: ReactNode;
 	if (documents === null) {
 		body = (
@@ -648,6 +671,7 @@ function DocumentsContent() {
 					<DocumentCard
 						key={doc.id}
 						doc={doc}
+						analysisStatus={liveStatuses[doc.id] ?? doc.analysisStatus}
 						onRenamed={renameLocal}
 						onDeleted={removeLocal}
 						onPreview={setPreview}
@@ -755,6 +779,7 @@ function DocumentsContent() {
 				onOpenChange={(open) => {
 					if (!open) setPreview(null);
 				}}
+				onReanalyzed={refreshStatuses}
 				onRename={async (id, newName) => {
 					const previous = preview?.name ?? '';
 					renameLocal(id, newName); // optimistic

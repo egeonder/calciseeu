@@ -22,7 +22,9 @@ import { motion } from 'motion/react';
 import { toast } from 'sonner';
 
 import { formatBytes } from '@/src/hooks/use-file-upload';
+import { useDocumentAnalysisStatuses } from '@/src/hooks/use-document-analysis-statuses';
 import { renameDocument } from '@/src/lib/document-library';
+import type { DocumentAnalysisStatus } from '@/src/db/schema';
 import type { AutomaticDocumentRef } from '@/src/lib/automatic';
 import { Button } from './ui/button';
 import {
@@ -90,6 +92,7 @@ function DocumentThumb({
 
 function DocumentRow({
 	doc,
+	analysisStatus,
 	onRename,
 	onRemove,
 	onPreview,
@@ -98,6 +101,7 @@ function DocumentRow({
 	isDragging = false,
 }: {
 	doc: AutomaticDocumentRef;
+	analysisStatus?: DocumentAnalysisStatus;
 	onRename?: RenameDocument;
 	onRemove?: RemoveDocument;
 	onPreview: (doc: AutomaticDocumentRef) => void;
@@ -191,9 +195,22 @@ function DocumentRow({
 								{doc.name}
 							</span>
 						)}
-						<span className="block text-xs text-muted-foreground">
-							{formatBytes(doc.size)}
-						</span>
+						{analysisStatus === 'failed' ? (
+							<span
+								className="flex items-center gap-1 text-xs text-destructive"
+								title="Belge analiz edilemedi. Önizleyip yeniden analiz edebilirsiniz."
+							>
+								<WarningCircleIcon
+									weight="fill"
+									className="size-3.5 shrink-0"
+								/>
+								Analiz edilemedi
+							</span>
+						) : (
+							<span className="block text-xs text-muted-foreground">
+								{formatBytes(doc.size)}
+							</span>
+						)}
 					</div>
 				</div>
 
@@ -264,12 +281,14 @@ function DocumentRow({
 function SortableDocumentRow({
 	doc,
 	index,
+	analysisStatus,
 	onRename,
 	onRemove,
 	onPreview,
 }: {
 	doc: AutomaticDocumentRef;
 	index: number;
+	analysisStatus?: DocumentAnalysisStatus;
 	onRename?: RenameDocument;
 	onRemove?: RemoveDocument;
 	onPreview: (doc: AutomaticDocumentRef) => void;
@@ -282,6 +301,7 @@ function SortableDocumentRow({
 	return (
 		<DocumentRow
 			doc={doc}
+			analysisStatus={analysisStatus}
 			dragHandleRef={handleRef}
 			isDragging={isDragging}
 			onPreview={onPreview}
@@ -306,6 +326,15 @@ function DocumentsList({
 	const [expanded, setExpanded] = useState(false);
 	const [search, setSearch] = useState('');
 	const [preview, setPreview] = useState<AutomaticDocumentRef | null>(null);
+
+	// Poll analysis status so attached documents that failed to analyze — and
+	// thus can't feed the calculation — are flagged before the user opens them.
+	const documentIds = useMemo(
+		() => documents.map((document) => document.id),
+		[documents],
+	);
+	const { statuses: analysisStatuses, refresh: refreshAnalysisStatuses } =
+		useDocumentAnalysisStatuses(documentIds);
 
 	const documentFuse = useMemo(
 		() => new Fuse(documents, { keys: ['name'], threshold: 0.4 }),
@@ -403,6 +432,7 @@ function DocumentsList({
 								key={doc.id}
 								doc={doc}
 								index={index}
+								analysisStatus={analysisStatuses[doc.id]}
 								onRename={onRename}
 								onRemove={onRemove}
 								onPreview={setPreview}
@@ -444,6 +474,7 @@ function DocumentsList({
 				onOpenChange={(open) => {
 					if (!open) setPreview(null);
 				}}
+				onReanalyzed={refreshAnalysisStatuses}
 				onRename={handleDialogRename}
 			/>
 		</>

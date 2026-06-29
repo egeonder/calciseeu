@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import {
 	Dialog,
@@ -11,6 +11,7 @@ import {
 import { DocumentAnalysisPanel } from '@/src/components/document-analysis-panel';
 import {
 	fetchDocumentDetail,
+	reanalyzeDocument,
 	type DocumentDetail,
 } from '@/src/lib/document-library';
 import { cn } from '@/lib/utils';
@@ -37,24 +38,36 @@ export function DocumentPreviewDialog({
 	document: doc,
 	onOpenChange,
 	onRename,
+	onReanalyzed,
 }: {
 	document: PreviewDocument | null;
 	onOpenChange: (open: boolean) => void;
 	/** Renames the document; returns whether it succeeded. Omit to hide rename. */
 	onRename?: (id: string, newName: string) => Promise<boolean>;
+	/** Called after a failed analysis is re-queued, so callers can refresh any
+	 * list status they show alongside the preview. */
+	onReanalyzed?: (id: string) => void;
 }) {
 	const [detail, setDetail] = useState<DocumentDetail | null>(null);
 	const [previewLoading, setPreviewLoading] = useState(false);
+	const [retrying, setRetrying] = useState(false);
+	// Bumped to re-run the loader (and resume polling) after a retry, without
+	// resetting the file preview the way opening a new document does.
+	const [reloadKey, setReloadKey] = useState(0);
 
 	const docId = doc?.id;
 
-	// Load the fresh preview URL + cached analysis whenever a document opens,
-	// polling while the analysis is still running.
+	// Reset the loaded detail + preview spinner whenever a different document
+	// opens (but not on a retry-triggered reload).
 	useEffect(() => {
-		if (!docId) {
-			setDetail(null);
-			return;
-		}
+		setDetail(null);
+		setPreviewLoading(true);
+	}, [docId]);
+
+	// Load the fresh preview URL + cached analysis, polling while the analysis
+	// is still running. Re-runs on retry via `reloadKey`.
+	useEffect(() => {
+		if (!docId) return;
 		let active = true;
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		const load = async () => {
@@ -68,14 +81,28 @@ export function DocumentPreviewDialog({
 				timer = setTimeout(load, 4000);
 			}
 		};
-		setDetail(null);
-		setPreviewLoading(true);
 		void load();
 		return () => {
 			active = false;
 			if (timer) clearTimeout(timer);
 		};
-	}, [docId]);
+	}, [docId, reloadKey]);
+
+	const handleRetry = useCallback(async () => {
+		if (!docId) return;
+		setRetrying(true);
+		const ok = await reanalyzeDocument(docId);
+		setRetrying(false);
+		if (!ok) return;
+		// Optimistically show the analyzing state and resume polling.
+		setDetail((current) =>
+			current
+				? { ...current, analysisStatus: 'pending', analysis: null }
+				: current,
+		);
+		setReloadKey((key) => key + 1);
+		onReanalyzed?.(docId);
+	}, [docId, onReanalyzed]);
 
 	const isPdf = doc?.type === 'application/pdf';
 	// Prefer the freshly signed URL (persisted ones expire); fall back to any
@@ -151,6 +178,8 @@ export function DocumentPreviewDialog({
 										? (newName) => onRename(doc.id, newName)
 										: undefined
 								}
+								onRetry={handleRetry}
+								retrying={retrying}
 							/>
 						</div>
 					</aside>

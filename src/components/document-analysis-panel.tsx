@@ -1,6 +1,7 @@
 'use client';
 
 import {
+	ArrowClockwiseIcon,
 	BankIcon,
 	CheckCircleIcon,
 	HouseLineIcon,
@@ -297,11 +298,17 @@ export function DocumentAnalysisPanel({
 	analysis,
 	currentName,
 	onRename,
+	onRetry,
+	retrying = false,
 }: {
 	status: DocumentAnalysisStatus;
 	analysis: DocumentAnalysis | null;
 	currentName?: string;
 	onRename?: (newName: string) => Promise<boolean>;
+	/** Re-runs the analysis; shown as a retry button when analysis failed. */
+	onRetry?: () => void;
+	/** Whether a retry is currently in flight. */
+	retrying?: boolean;
 }) {
 	if (
 		status === 'pending' ||
@@ -329,10 +336,27 @@ export function DocumentAnalysisPanel({
 				<div>
 					<p className="text-sm font-medium">Belge analiz edilemedi.</p>
 					<p className="mt-1 text-xs text-muted-foreground">
-						Bu belge otomatik olarak okunamadı. Bilgileri elle
-						girebilirsiniz.
+						Bu belge otomatik olarak okunamadı, bu yüzden
+						bilgileri hesaplamada kullanılamaz. Yeniden deneyebilir
+						veya bilgileri elle girebilirsiniz.
 					</p>
 				</div>
+				{onRetry && (
+					<Button
+						type="button"
+						size="sm"
+						variant="outline"
+						disabled={retrying}
+						onClick={onRetry}
+					>
+						{retrying ? (
+							<Spinner className="size-4" />
+						) : (
+							<ArrowClockwiseIcon />
+						)}
+						Yeniden analiz et
+					</Button>
+				)}
 			</div>
 		);
 	}

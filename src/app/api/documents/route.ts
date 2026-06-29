@@ -43,6 +43,7 @@ export async function GET() {
 			type: row.type,
 			createdAt: row.createdAt,
 			url: await createDownloadUrl(row.key),
+			analysisStatus: row.analysisStatus,
 		})),
 	);
 

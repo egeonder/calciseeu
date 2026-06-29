@@ -17,6 +17,7 @@ import {
 	FolderOpenIcon,
 	MagnifyingGlassIcon,
 	UploadSimpleIcon,
+	WarningIcon,
 } from '@phosphor-icons/react';
 import { PaperclipIcon } from 'lucide-react';
 import { toast } from 'sonner';
@@ -53,9 +54,15 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from './ui/dialog';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { cn } from '@/lib/utils';
+import {
+	AutomaticQuestions,
+	type ClarifyingAnswer,
+} from './automatic-questions';
 import type {
+	AutomaticCalculationData,
 	AutomaticChatMessage,
 	AutomaticDocumentRef,
+	AutomaticPendingQuestions,
 } from '@/src/lib/automatic';
 import {
 	fetchDocuments,
@@ -71,12 +78,16 @@ import { formatBytes } from '@/src/hooks/use-file-upload';
 import { LoginPromptDialog } from '@/src/components/login-prompt-dialog';
 import { useAppSession } from '@/src/lib/session';
 
-type AutomaticAgentEvent = 'start' | 'documents_changed';
+type AutomaticAgentEvent = 'documents_changed';
+
+const AUTOMATIC_START_MESSAGE =
+	'ISEEU hesaplaması için belgelerimi yükledim. Belgelerimi inceleyip otomatik hesaplamayı başlatabilirsin.';
 
 export function AutomaticChat({
 	calculationId,
 	documents,
 	initialMessages,
+	initialPendingQuestions,
 	onDocumentsUploaded,
 	onCalculationUpdated,
 	className,
@@ -84,10 +95,11 @@ export function AutomaticChat({
 	calculationId: string | null;
 	documents: AutomaticDocumentRef[];
 	initialMessages: AutomaticChatMessage[];
+	initialPendingQuestions?: AutomaticPendingQuestions | null;
 	onDocumentsUploaded: (
 		documents: AutomaticDocumentRef[],
 	) => Promise<boolean>;
-	onCalculationUpdated?: () => void | Promise<void>;
+	onCalculationUpdated?: () => Promise<AutomaticCalculationData | null> | void;
 	className?: string;
 }) {
 	const { session } = useAppSession();
@@ -95,6 +107,10 @@ export function AutomaticChat({
 	const [loginPromptOpen, setLoginPromptOpen] = useState(false);
 	const [messages, setMessages] =
 		useState<AutomaticChatMessage[]>(initialMessages);
+	const [pendingQuestions, setPendingQuestions] =
+		useState<AutomaticPendingQuestions | null>(
+			initialPendingQuestions ?? null,
+		);
 	const [input, setInput] = useState('');
 	const [status, setStatus] = useState<ChatStatus>('ready');
 	const [uploadingDocuments, setUploadingDocuments] = useState(false);
@@ -102,11 +118,22 @@ export function AutomaticChat({
 	const [library, setLibrary] = useState<LibraryDocument[] | null>(null);
 	const [librarySearch, setLibrarySearch] = useState('');
 	const [picked, setPicked] = useState<Set<string>>(new Set());
+	// Documents added to the chat after the latest agent turn started. They are
+	// not part of the current calculation until a recalculation that began after
+	// they were added completes.
+	const [pendingDocuments, setPendingDocuments] = useState<
+		AutomaticDocumentRef[]
+	>([]);
+	const [recalculatingPending, setRecalculatingPending] = useState(false);
 	const documentInputRef = useRef<HTMLInputElement>(null);
 	const initialRequestStarted = useRef(false);
 	const abortController = useRef<AbortController | null>(null);
 	const statusRef = useRef<ChatStatus>('ready');
-	const pendingDocumentRecalculation = useRef(false);
+	const pendingDocumentsRef = useRef<AutomaticDocumentRef[]>([]);
+
+	useEffect(() => {
+		pendingDocumentsRef.current = pendingDocuments;
+	}, [pendingDocuments]);
 	const selectedDocumentIds = useMemo(
 		() => new Set(documents.map((document) => document.id)),
 		[documents],
@@ -136,6 +163,18 @@ export function AutomaticChat({
 		[],
 	);
 
+	// Pull the latest saved calculation and surface any clarifying questions the
+	// agent persisted during the turn.
+	const syncCalculation = useCallback(
+		async (): Promise<AutomaticCalculationData | null> => {
+			const automatic = await onCalculationUpdated?.();
+			if (!automatic) return null;
+			setPendingQuestions(automatic.pendingQuestions ?? null);
+			return automatic;
+		},
+		[onCalculationUpdated],
+	);
+
 	const streamAssistant = useCallback(
 		async (
 			userMessage?: AutomaticChatMessage,
@@ -159,6 +198,9 @@ export function AutomaticChat({
 			const assistantId = nanoid();
 			let assistantText = '';
 			let assistantAdded = false;
+			// Any turn re-examines the full attached document set, so a turn that
+			// starts while documents are pending incorporates them on completion.
+			const clearsPendingDocuments = pendingDocumentsRef.current.length > 0;
 
 			try {
 				const response = await fetch('/api/automatic/chat', {
@@ -214,8 +256,13 @@ export function AutomaticChat({
 					}
 				}
 				assistantText += decoder.decode();
-				if (!assistantText.trim()) throw new Error('Boş yanıt alındı.');
-				await onCalculationUpdated?.();
+				const automatic = await syncCalculation();
+				const hasPendingQuestions =
+					(automatic?.pendingQuestions?.questions.length ?? 0) > 0;
+				if (!assistantText.trim() && !hasPendingQuestions) {
+					throw new Error('Boş yanıt alındı.');
+				}
+				if (clearsPendingDocuments) setPendingDocuments([]);
 			} catch (error) {
 				if (controller.signal.aborted) return;
 				toast.error('ISEEU asistanı yanıt veremedi', {
@@ -232,38 +279,73 @@ export function AutomaticChat({
 				setStatus('ready');
 			}
 		},
-		[calculationId, isSignedIn, onCalculationUpdated],
+		[calculationId, isSignedIn, syncCalculation],
 	);
 
 	useEffect(() => {
+		if (initialRequestStarted.current || !calculationId) return;
+
+		const startMessageId = `automatic-start-${calculationId}`;
+		const existingStartMessage = initialMessages.find(
+			(message) => message.id === startMessageId && message.role === 'user',
+		);
 		if (
-			initialRequestStarted.current ||
-			!calculationId ||
-			initialMessages.length > 0
+			initialMessages.length > 0 &&
+			(!existingStartMessage ||
+				initialMessages.some((message) => message.role === 'assistant'))
 		) {
 			return;
 		}
-		initialRequestStarted.current = true;
-		void streamAssistant(undefined, 'start');
-	}, [calculationId, initialMessages.length, streamAssistant]);
 
-	const requestDocumentRecalculation = useCallback(() => {
-		pendingDocumentRecalculation.current = true;
+		// In development, Strict Mode immediately cleans up and re-runs effects.
+		// Deferring the bootstrap lets that first cleanup cancel the scheduled
+		// work instead of aborting a request and leaving only its optimistic UI.
+		const timeout = window.setTimeout(() => {
+			if (initialRequestStarted.current) return;
+			initialRequestStarted.current = true;
+			const userMessage: AutomaticChatMessage =
+				existingStartMessage ?? {
+					id: startMessageId,
+					role: 'user',
+					text: AUTOMATIC_START_MESSAGE,
+					createdAt: new Date().toISOString(),
+				};
+			if (!existingStartMessage) {
+				setMessages((previous) =>
+					previous.some((message) => message.id === startMessageId)
+						? previous
+						: [...previous, userMessage],
+				);
+			}
+			void streamAssistant(userMessage);
+		}, 0);
+
+		return () => window.clearTimeout(timeout);
+	}, [calculationId, initialMessages, streamAssistant]);
+
+	// Flag newly added documents as not yet part of the calculation instead of
+	// recalculating automatically; the user triggers the recalculation from the
+	// warning banner when the agent is idle.
+	const markDocumentsPending = useCallback(
+		(added: AutomaticDocumentRef[]) => {
+			if (added.length === 0) return;
+			setPendingDocuments((previous) => {
+				const seen = new Set(previous.map((document) => document.id));
+				return [
+					...previous,
+					...added.filter((document) => !seen.has(document.id)),
+				];
+			});
+		},
+		[],
+	);
+
+	const recalculateWithPendingDocuments = useCallback(async () => {
 		if (statusRef.current !== 'ready') return;
-		pendingDocumentRecalculation.current = false;
-		void streamAssistant(undefined, 'documents_changed');
+		setRecalculatingPending(true);
+		await streamAssistant(undefined, 'documents_changed');
+		setRecalculatingPending(false);
 	}, [streamAssistant]);
-
-	useEffect(() => {
-		if (
-			status !== 'ready' ||
-			!pendingDocumentRecalculation.current
-		) {
-			return;
-		}
-		pendingDocumentRecalculation.current = false;
-		void streamAssistant(undefined, 'documents_changed');
-	}, [status, streamAssistant]);
 
 	// Parameter tools persist while the model is still working. Poll the saved
 	// calculation during a turn so newly confirmed rows appear in the overview
@@ -271,15 +353,15 @@ export function AutomaticChat({
 	useEffect(() => {
 		if (status === 'ready' || !onCalculationUpdated) return;
 		const interval = setInterval(() => {
-			void onCalculationUpdated();
+			void syncCalculation();
 		}, 1500);
 		return () => clearInterval(interval);
-	}, [onCalculationUpdated, status]);
+	}, [onCalculationUpdated, syncCalculation, status]);
 
-	const handleSubmit = useCallback(
-		(message: PromptInputMessage) => {
-			const text = message.text?.trim();
-			if (!text || status !== 'ready' || !calculationId) return;
+	const submitUserMessage = useCallback(
+		(rawText: string) => {
+			const text = rawText.trim();
+			if (!text || statusRef.current !== 'ready' || !calculationId) return;
 			if (!isSignedIn) {
 				setLoginPromptOpen(true);
 				return;
@@ -295,7 +377,31 @@ export function AutomaticChat({
 			setInput('');
 			void streamAssistant(userMessage);
 		},
-		[calculationId, isSignedIn, status, streamAssistant],
+		[calculationId, isSignedIn, streamAssistant],
+	);
+
+	const handleSubmit = useCallback(
+		(message: PromptInputMessage) => {
+			if (status !== 'ready') return;
+			submitUserMessage(message.text ?? '');
+		},
+		[status, submitUserMessage],
+	);
+
+	// Collapse the agent's clarifying questions into one message so it can resume
+	// with every answer (or an explicit skip) in context.
+	const handleQuestionsComplete = useCallback(
+		(answers: ClarifyingAnswer[]) => {
+			setPendingQuestions(null);
+			const lines = answers
+				.map(
+					({ question, answer }) =>
+						`- ${question}: ${answer ?? '(atlandı)'}`,
+				)
+				.join('\n');
+			submitUserMessage(`Netleştirme sorularına yanıtlarım:\n${lines}`);
+		},
+		[submitUserMessage],
 	);
 
 	const handleDocumentSelection = useCallback(
@@ -365,13 +471,13 @@ export function AutomaticChat({
 			);
 			if (uploadedDocuments.length > 0) {
 				const persisted = await onDocumentsUploaded(uploadedDocuments);
-				if (persisted) requestDocumentRecalculation();
+				if (persisted) markDocumentsPending(uploadedDocuments);
 			}
 		},
 		[
 			documents.length,
 			onDocumentsUploaded,
-			requestDocumentRecalculation,
+			markDocumentsPending,
 			isSignedIn,
 		],
 	);
@@ -432,16 +538,20 @@ export function AutomaticChat({
 			toast.success('Belgeler eklendi', {
 			description: `${selected.length} belge bu hesaplamaya eklendi.`,
 		});
-		requestDocumentRecalculation();
+		markDocumentsPending(selected);
 	}, [
 		library,
 		onDocumentsUploaded,
 		picked,
-		requestDocumentRecalculation,
+		markDocumentsPending,
 		selectedDocumentIds,
 	]);
 
 	const waiting = status === 'submitted';
+	const showQuestions =
+		status === 'ready' &&
+		!!pendingQuestions &&
+		pendingQuestions.questions.length > 0;
 
 	return (
 		<div
@@ -508,58 +618,100 @@ export function AutomaticChat({
 					ref={documentInputRef}
 					type="file"
 				/>
-				<PromptInput onSubmit={handleSubmit}>
-					<PromptInputBody>
-						<PromptInputTextarea
-							value={input}
-							onChange={(event) =>
-								setInput(event.currentTarget.value)
-							}
-							placeholder="Belgeleriniz hakkında bir şey sorun ya da bilgi ekleyin…"
+				{pendingDocuments.length > 0 && !recalculatingPending && (
+					<div className="mb-2 flex items-start gap-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-sm dark:border-amber-400/30 dark:bg-amber-400/10">
+						<WarningIcon
+							className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+							weight="fill"
 						/>
-					</PromptInputBody>
-					<PromptInputFooter>
-						<PromptInputTools>
-							<DropdownMenu>
-								<DropdownMenuTrigger
-									render={
-										<PromptInputButton
-											aria-label="Belge ekle"
-											disabled={uploadingDocuments}
+						<div className="min-w-0 flex-1">
+							<p className="text-foreground">
+								<span className="font-medium">
+									{pendingDocuments
+										.map((document) => document.name)
+										.join(', ')}
+								</span>{' '}
+								şu anki hesaplamada henüz kullanılmıyor.
+							</p>
+							{status !== 'ready' && (
+								<p className="mt-0.5 text-xs text-muted-foreground">
+									Yeni belgeleriniz bir sonraki hesaplamada
+									kullanılacak.
+								</p>
+							)}
+						</div>
+						{status === 'ready' && (
+							<Button
+								className="shrink-0"
+								onClick={recalculateWithPendingDocuments}
+								size="sm"
+								type="button"
+							>
+								Yeniden hesapla
+							</Button>
+						)}
+					</div>
+				)}
+				{showQuestions && pendingQuestions ? (
+					<AutomaticQuestions
+						key={pendingQuestions.id}
+						questions={pendingQuestions.questions}
+						onComplete={handleQuestionsComplete}
+					/>
+				) : (
+					<PromptInput onSubmit={handleSubmit}>
+						<PromptInputBody>
+							<PromptInputTextarea
+								value={input}
+								onChange={(event) =>
+									setInput(event.currentTarget.value)
+								}
+								placeholder="Belgeleriniz hakkında bir şey sorun ya da bilgi ekleyin…"
+							/>
+						</PromptInputBody>
+						<PromptInputFooter>
+							<PromptInputTools>
+								<DropdownMenu>
+									<DropdownMenuTrigger
+										render={
+											<PromptInputButton
+												aria-label="Belge ekle"
+												disabled={uploadingDocuments}
+											>
+												<PaperclipIcon size={16} />
+											</PromptInputButton>
+										}
+									></DropdownMenuTrigger>
+									<DropdownMenuContent
+										align="start"
+										className="w-56"
+									>
+										<DropdownMenuItem
+											onClick={() => {
+												if (!isSignedIn) {
+													setLoginPromptOpen(true);
+													return;
+												}
+												documentInputRef.current?.click();
+											}}
 										>
-											<PaperclipIcon size={16} />
-										</PromptInputButton>
-									}
-								></DropdownMenuTrigger>
-								<DropdownMenuContent
-									align="start"
-									className="w-56"
-								>
-									<DropdownMenuItem
-										onClick={() => {
-											if (!isSignedIn) {
-												setLoginPromptOpen(true);
-												return;
-											}
-											documentInputRef.current?.click();
-										}}
-									>
-										<UploadSimpleIcon /> Yeni belge yükle
-									</DropdownMenuItem>
-									<DropdownMenuItem
-										onClick={openLibraryPicker}
-									>
-										<FolderOpenIcon /> Belgelerimden seç
-									</DropdownMenuItem>
-								</DropdownMenuContent>
-							</DropdownMenu>
-						</PromptInputTools>
-						<PromptInputSubmit
-							status={status}
-							disabled={status !== 'ready' || !calculationId}
-						/>
-					</PromptInputFooter>
-				</PromptInput>
+											<UploadSimpleIcon /> Yeni belge yükle
+										</DropdownMenuItem>
+										<DropdownMenuItem
+											onClick={openLibraryPicker}
+										>
+											<FolderOpenIcon /> Belgelerimden seç
+										</DropdownMenuItem>
+									</DropdownMenuContent>
+								</DropdownMenu>
+							</PromptInputTools>
+							<PromptInputSubmit
+								status={status}
+								disabled={status !== 'ready' || !calculationId}
+							/>
+						</PromptInputFooter>
+					</PromptInput>
+				)}
 
 				<Dialog open={pickerOpen} onOpenChange={setPickerOpen}>
 					<DialogContent className="flex max-h-[calc(100dvh-3rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-lg">

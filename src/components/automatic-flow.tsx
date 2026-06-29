@@ -19,6 +19,7 @@ import type {
 	AutomaticChatMessage,
 	AutomaticDocumentRef,
 	AutomaticIseeuResult,
+	AutomaticPendingQuestions,
 } from '@/src/lib/automatic';
 import { formatEur } from '@/src/lib/iseeu';
 import { Button } from '@/src/components/ui/button';
@@ -93,6 +94,8 @@ export function AutomaticFlow() {
 	const [initialMessages, setInitialMessages] = useState<
 		AutomaticChatMessage[]
 	>([]);
+	const [initialPendingQuestions, setInitialPendingQuestions] =
+		useState<AutomaticPendingQuestions | null>(null);
 	const [automaticResult, setAutomaticResult] =
 		useState<AutomaticIseeuResult>();
 	const [automaticParameters, setAutomaticParameters] = useState<
@@ -115,7 +118,15 @@ export function AutomaticFlow() {
 	// Re-open a saved automatic calculation from `?id=`: load its documents and
 	// drop straight into the chat interface.
 	useEffect(() => {
-		if (!savedId || savedId === justCreated.current) {
+		if (!savedId) {
+			setLoadingSaved(false);
+			return;
+		}
+		if (savedId === justCreated.current) {
+			// Wait for the URL replacement to finish before mounting the chat. If
+			// the chat mounts earlier, this navigation can unmount it and abort its
+			// initial streaming request.
+			setStarted(true);
 			setLoadingSaved(false);
 			return;
 		}
@@ -142,6 +153,7 @@ export function AutomaticFlow() {
 				const automatic = calculation?.data?.automatic;
 				setDocuments(automatic?.documents ?? []);
 				setInitialMessages(automatic?.messages ?? []);
+				setInitialPendingQuestions(automatic?.pendingQuestions ?? null);
 				setAutomaticParameters(automatic?.parameters ?? []);
 				setAutomaticResult(automatic?.result);
 				setStarted(true);
@@ -154,24 +166,27 @@ export function AutomaticFlow() {
 		};
 	}, [savedId, isSignedIn]);
 
-	const refreshAutomaticCalculation = useCallback(async () => {
-		const calculationId = savedId ?? justCreated.current;
-		if (!calculationId) return;
-		const response = await fetch(
-			`/api/calculations/${encodeURIComponent(calculationId)}`,
-		).catch(() => null);
-		if (response?.ok) {
-			const { calculation } = (await response.json()) as {
-				calculation?: {
-					data?: { automatic?: AutomaticCalculationData };
+	const refreshAutomaticCalculation =
+		useCallback(async (): Promise<AutomaticCalculationData | null> => {
+			const calculationId = savedId ?? justCreated.current;
+			if (!calculationId) return null;
+			const response = await fetch(
+				`/api/calculations/${encodeURIComponent(calculationId)}`,
+			).catch(() => null);
+			let automatic: AutomaticCalculationData | null = null;
+			if (response?.ok) {
+				const { calculation } = (await response.json()) as {
+					calculation?: {
+						data?: { automatic?: AutomaticCalculationData };
+					};
 				};
-			};
-			const automatic = calculation?.data?.automatic;
-			setAutomaticParameters(automatic?.parameters ?? []);
-			setAutomaticResult(automatic?.result);
-		}
-		await refreshCalculations();
-	}, [savedId]);
+				automatic = calculation?.data?.automatic ?? null;
+				setAutomaticParameters(automatic?.parameters ?? []);
+				setAutomaticResult(automatic?.result);
+			}
+			await refreshCalculations();
+			return automatic;
+		}, [savedId]);
 
 	const canStart = documents.length > 0;
 
@@ -338,6 +353,7 @@ export function AutomaticFlow() {
 			const { id } = (await response.json()) as { id: string };
 			justCreated.current = id;
 			setInitialMessages([]);
+			setInitialPendingQuestions(null);
 			setAutomaticParameters([]);
 			setAutomaticResult(undefined);
 			upsertCalculationLocal({
@@ -348,10 +364,10 @@ export function AutomaticFlow() {
 				createdAt: new Date().toISOString(),
 			});
 			setActiveCalculation(id);
-			setStarted(true);
 			setCreating(false);
 			// Reflect the new chat in the URL so a reload re-opens it and the
-			// sidebar can mark it active.
+			// sidebar can mark it active. The saved-id effect mounts the chat only
+			// after this navigation has completed.
 			router.replace(`/automatic?id=${encodeURIComponent(id)}`);
 			return;
 		}
@@ -379,6 +395,7 @@ export function AutomaticFlow() {
 						calculationId={calculationId}
 						documents={documents}
 						initialMessages={initialMessages}
+						initialPendingQuestions={initialPendingQuestions}
 						onDocumentsUploaded={handleChatDocumentsUploaded}
 						onCalculationUpdated={
 							refreshAutomaticCalculation

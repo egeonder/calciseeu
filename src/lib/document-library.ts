@@ -12,6 +12,8 @@ export type LibraryDocument = {
 	createdAt: string;
 	/** Short-lived presigned URL used for preview / download. */
 	url: string;
+	/** Lifecycle of the document's automatic ISEEU analysis. */
+	analysisStatus: DocumentAnalysisStatus;
 };
 
 /** Fetches the signed-in user's uploaded documents, newest first. */
@@ -32,6 +34,37 @@ export async function getDocumentUrl(id: string): Promise<string | null> {
 	if (!response || !response.ok) return null;
 	const { url } = (await response.json()) as { url?: string };
 	return url ?? null;
+}
+
+/**
+ * Fetches the analysis status of several documents at once, keyed by id.
+ * Returns an empty map on any failure.
+ */
+export async function fetchDocumentStatuses(
+	ids: string[],
+): Promise<Record<string, DocumentAnalysisStatus>> {
+	if (ids.length === 0) return {};
+	const query = encodeURIComponent(ids.join(','));
+	const response = await fetch(`/api/documents/statuses?ids=${query}`).catch(
+		() => null,
+	);
+	if (!response || !response.ok) return {};
+	const { statuses } = (await response.json()) as {
+		statuses?: Record<string, DocumentAnalysisStatus>;
+	};
+	return statuses ?? {};
+}
+
+/**
+ * Re-runs the automatic analysis of a document whose previous attempt failed.
+ * Returns true once the re-analysis has been queued.
+ */
+export async function reanalyzeDocument(id: string): Promise<boolean> {
+	const response = await fetch(
+		`/api/documents/${encodeURIComponent(id)}/reanalyze`,
+		{ method: 'POST' },
+	).catch(() => null);
+	return !!response && response.ok;
 }
 
 /** A document with its fresh preview URL and cached LLM analysis. */

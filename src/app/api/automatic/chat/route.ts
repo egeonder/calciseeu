@@ -3,6 +3,7 @@ import { headers } from 'next/headers';
 import { openai } from '@ai-sdk/openai';
 import {
 	createTextStreamResponse,
+	hasToolCall,
 	isStepCount,
 	streamText,
 	toTextStream,
@@ -16,7 +17,9 @@ import type {
 	AutomaticCalculationData,
 	AutomaticCalculationParameter,
 	AutomaticChatMessage,
+	AutomaticClarifyingQuestion,
 	AutomaticParameterKind,
+	AutomaticPendingQuestions,
 } from '@/src/lib/automatic';
 import {
 	buildAutomaticIseeuInput,
@@ -29,6 +32,7 @@ export const maxDuration = 60;
 
 const MODEL = process.env.OPENAI_AUTOMATIC_MODEL ?? 'gpt-5.4';
 const MAX_MESSAGE_LENGTH = 4000;
+const MAX_AGENT_STEPS = 8;
 const RESTRICTED_META_REQUESTS = [
 	/system\s*prompt/i,
 	/developer\s*(message|prompt|instructions?)/i,
@@ -67,12 +71,24 @@ Gizlilik ve veri kaynağı kuralları:
 4. Belgeden veya kullanıcı açıklamasından kesinleşen her parametreyi hemen saveCalculationParameters aracıyla kaydet. Aynı turdaki kesin parametreleri tek çağrıda toplu kaydet. Tahmin, çıkarım veya null değer kaydetme.
 5. Sabit kimlikleri kullan: reference-year, household-size, child-count ve confirmation-<kategori>. Gelir/varlık kimliklerini belge id + kayıt türü + sıra ile kararlı oluştur; aynı parametreyi yeni kimlikle çoğaltma.
 6. Bir kategori ancak eksiksiz belgelenmiş veya kullanıcı tarafından açıkça doğrulanmışsa category_confirmation olarak kaydedilir. Varlık/gelir yokluğu da açıkça doğrulanmalıdır.
-7. Eksik belge veya belirsizlik varsa yalnızca eksikleri söyle ve hedefli soru sor. Eksik değerleri sıfır varsayma.
+7. Eksik bilgi varsa önce kaynağına bak: bu bilgi bir belgede olmalıysa kullanıcıya o belgeyi yüklemesini öner; bilgiyi sözlü olarak beyan etmesini isteme. Eksik değerleri sıfır varsayma.
 8. Yalnızca tüm kategoriler doğrulanıp parametreler kaydedildikten sonra calculateIseeu aracını çağır. Bu araç girdiyi kayıtlı parametrelerden kurar. ISEEU, ISR, ISP veya ISPEU aritmetiğini hiçbir koşulda kendin yapma ya da araç sonucu olmadan sayı üretme.
+
+Belge önceliği ve netleştirme:
+- Tüm kesin bilgiler kullanıcının yüklediği PDF/belgelerden gelir. Bir bilgi belgede bulunabiliyorsa, kullanıcıdan onu sözlü beyan etmesini değil, ilgili belgeyi yüklemesini iste. Yüklemesi gereken belgeyi yanıt metninde net ve kısa söyle.
+- Sözlü netleştirmeyi yalnızca belgeden anlaşılamayan bir noktayı çözmek için kullan ve bunu askClarifyingQuestions aracıyla yap; yanıt metnine soru yazma. Soruları kısa bir liste olarak ver; her soru tek bir belirsizliği gidersin.
+- Belgeden net çıkan veya hesabı anlamlı biçimde etkilemeyen hiçbir şey için soru sorma. Gereksinimleri düşük tut; kullanıcının ISEEU'sunu hesaplamayı kolay ve akıcı yap. Olabildiğince az soru sor (en fazla 4).
+- Cevabı sınırlı ve tahmin edilebilir olan sorularda options ile 2-4 hazır seçenek sun; serbest yanıt gereken sorularda options verme. Kullanıcı her durumda kendi yanıtını yazabilir veya soruyu atlayabilir.
+- askClarifyingQuestions çağırdığın turda başka araç çağırma ve hesaplama yapma; kullanıcının yanıtlarını bekle. Yanıtlar geldikten sonra parametreleri kaydedip akışa devam et. Bu döngüyü kesin sonuca ulaşana kadar sürdür.
+
+Belge bulgularını olduğu gibi kabul etme:
+- Referans her zaman 2024 verisidir. Bir belge bulgusu bir üye için 2024'te kayıtlı taşınmaz/varlık olmadığını açıkça gösteriyorsa (ör. "X üyesinin mülkü var ama 2024 için mülk kaydı yok", "2024 taşınmaz kaydı yoktur"), bunu o üye için "taşınmaz/varlık yok" yani sıfır olarak kabul et; bu, kategori_confirmation için gereken açık doğrulamayı karşılar ve ayrıca tekrar doğrulama veya belge isteme.
+- Bir üye için yalnızca bir banka belgesi/hesap özeti varsa, o üyenin tek aktif banka hesabı olduğunu kabul et. Başka banka hesabı olup olmadığını sorma ve bu nedenle ek belge isteme.
 
 Hesaplama rehberi:
 - ISE = ISR + %20 × ISP; ISEEU = ISE / eşdeğerlik katsayısı; ISPEU = ISP / katsayı.
 - Maaşta kişi başına %20 (en çok 3.000 €), emekli gelirinde %20 (en çok 1.000 €) kesinti.
+- Bir kişi 2024'te birden fazla gelir türüne sahip olabilir. Özellikle 2024 ortasında emekli olan bir ebeveyn, yılın bir kısmında maaş, kalanında emekli aylığı almıştır. Bu durumda o kişi için hem maaş hem emekli aylığını ayrı income parametreleri olarak (kind="salary" ve kind="pension") kaydet; ikisini birleştirme ve birini diğerine çevirme. Her tür kendi kesintisini alır. Her tutar yalnızca 2024'te fiilen alınan miktardır; kısmi dönemi tam yıla tamamlama.
 - Banka hesabında yalnızca 31.12.2024 bakiyesi kullanılır. Yıllık ortalama bakiye istenmez, kaydedilmez ve hesaplamaya girmez.
 - Taşınır franchise: 1 kişi 6.000 €, 2 kişi 8.000 €, 3+ kişi 10.000 €; 4+ hanede ikinci çocuktan sonraki her çocuk +1.000 €.
 - Yurt dışı bina 500 €/m²; sahiplik, mortgage, ana konut 52.500 € eşiği ve eşik üstünün 2/3'ü uygulanır.
@@ -82,7 +98,7 @@ Hesaplama rehberi:
 Yanıt biçimi:
 - Türkçe, kısa ve doğrudan yaz. Genellikle 1-4 kısa cümle veya yalnızca gerekli maddeleri kullan.
 - Giriş, süreç anlatımı, genel bilgi, tekrar ve gereksiz açıklama ekleme.
-- Eksik varsa yalnızca eksik belge/bilgileri ve cevaplanması gereken soruyu yaz.
+- Eksik varsa yalnızca yüklenmesi gereken belgeyi kısaca yaz. Sözlü netleştirme gerekiyorsa soruyu metne yazma; askClarifyingQuestions aracını çağır ve kısa bir giriş cümlesiyle yetin.
 - Sonuç varsa ISR, ISP, ISEEU ve ISPEU'yu kısa biçimde göster; tek cümleyle bunun tahmin olduğunu belirt.
 - Kullanıcı özellikle ayrıntı istemedikçe formülü veya hesap adımlarını açıklama.`;
 
@@ -248,6 +264,29 @@ async function appendMessage(
 		);
 }
 
+async function setPendingQuestions(
+	calculationId: string,
+	userId: string,
+	pendingQuestions: AutomaticPendingQuestions | null,
+) {
+	const current = await loadCalculation(calculationId, userId);
+	if (!current?.data.automatic) return;
+	await db
+		.update(calculation)
+		.set({
+			data: {
+				...current.data,
+				automatic: { ...current.data.automatic, pendingQuestions },
+			},
+		})
+		.where(
+			and(
+				eq(calculation.id, calculationId),
+				eq(calculation.userId, userId),
+			),
+		);
+}
+
 function selectAnalysisScope(
 	analysis: NonNullable<(typeof document.$inferSelect)['analysis']>,
 	scope:
@@ -350,6 +389,9 @@ export async function POST(request: Request) {
 			text: messageText,
 			createdAt: new Date().toISOString(),
 		});
+		// A new user message supersedes any clarifying questions that were awaiting
+		// answers, so the question UI does not reappear after this turn.
+		await setPendingQuestions(calculationId, session.user.id, null);
 		current = (await loadCalculation(calculationId, session.user.id))!;
 
 		if (isRestrictedMetaRequest(messageText)) {
@@ -607,6 +649,64 @@ export async function POST(request: Request) {
 				return { saved, parameters: nextParameters };
 			},
 		}),
+		askClarifyingQuestions: tool({
+			description:
+				'Presents a short list of clarifying questions to the user in a dedicated UI, shown instead of the chat input. Use only to resolve an ambiguity that the uploaded documents cannot answer — never to ask the user to verbally declare a fact that belongs in a document. After calling this, stop and wait for the answers.',
+			inputSchema: z.object({
+				questions: z
+					.array(
+						z.object({
+							question: z
+								.string()
+								.min(1)
+								.max(300)
+								.describe('A single, specific clarifying question.'),
+							options: z
+								.array(z.string().min(1).max(120))
+								.max(4)
+								.optional()
+								.describe(
+									'2-4 preset answers when the answer is constrained. Omit for open-ended questions. The user can always type their own answer or skip.',
+								),
+							placeholder: z
+								.string()
+								.max(120)
+								.optional()
+								.describe('Hint text for the free-text field.'),
+						}),
+					)
+					.min(1)
+					.max(4),
+			}),
+			execute: async ({ questions }) => {
+				const pendingQuestions: AutomaticPendingQuestions = {
+					id: crypto.randomUUID(),
+					createdAt: new Date().toISOString(),
+					questions: questions.map(
+						(question): AutomaticClarifyingQuestion => ({
+							id: crypto.randomUUID(),
+							question: question.question,
+							...(question.options && question.options.length > 0
+								? { options: question.options }
+								: {}),
+							...(question.placeholder
+								? { placeholder: question.placeholder }
+								: {}),
+						}),
+					),
+				};
+				await setPendingQuestions(
+					calculationId,
+					session.user.id,
+					pendingQuestions,
+				);
+				return {
+					ok: true,
+					presented: pendingQuestions.questions.length,
+					note: 'Questions presented to the user. Do not call more tools this turn; wait for the answers.',
+				};
+			},
+		}),
 		calculateIseeu: tool({
 			description:
 				'Builds formula input only from saved parameters, validates category confirmations, runs the deterministic ISEEU formula, and persists the result. The model must never calculate values itself.',
@@ -633,6 +733,7 @@ export async function POST(request: Request) {
 				if (currentWithParameters?.data.automatic) {
 					const automatic: AutomaticCalculationData = {
 						...currentWithParameters.data.automatic,
+						pendingQuestions: null,
 						result: computed.result,
 					};
 					await db
@@ -681,18 +782,26 @@ export async function POST(request: Request) {
 		system: SYSTEM_PROMPT,
 		messages: modelMessages,
 		tools,
-		stopWhen: isStepCount(8),
-		prepareStep: ({ stepNumber }) =>
-			stepNumber === 0
-				? {
-						activeTools: ['getSavedCalculationParameters'],
-						toolChoice: {
-							type: 'tool',
-							toolName: 'getSavedCalculationParameters',
-						},
-					}
-				: undefined,
-		maxOutputTokens: 700,
+		stopWhen: [
+			hasToolCall('askClarifyingQuestions'),
+			isStepCount(MAX_AGENT_STEPS),
+		],
+		prepareStep: ({ stepNumber }) => {
+			if (stepNumber === 0) {
+				return {
+					activeTools: ['getSavedCalculationParameters'],
+					toolChoice: {
+						type: 'tool',
+						toolName: 'getSavedCalculationParameters',
+					},
+				};
+			}
+			if (stepNumber === MAX_AGENT_STEPS - 1) {
+				return { activeTools: [], toolChoice: 'none' };
+			}
+			return undefined;
+		},
+		maxOutputTokens: 2000,
 		onChunk: ({ chunk }) => {
 			if (chunk.type === 'text-delta') streamedText += chunk.text;
 		},
